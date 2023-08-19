@@ -1,4 +1,5 @@
-﻿using Microsoft.Win32;
+﻿using KeePass.Util.SendInputExt;
+using Microsoft.Win32;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -6,6 +7,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Timers;
 using System.Windows.Forms;
+using static Stego.StegoExt;
 
 namespace Stego
 {
@@ -16,18 +18,29 @@ namespace Stego
         private bool dialogHasResponse = true;
         private bool screenLocked = false;
         private bool checkedOut = false;
-        public StegoSession(double beenAWhileTimeInMinutes, double responseTimeInMinutes) 
+        private StegoExt.CheckOutType checkedOutType;
+        private List<string> stegos;
+        public StegoSession(double beenAWhileTimeInMinutes, double responseTimeInMinutes)
         {
             beenAWhileTimeInMinutes *= 60000;
             responseTimeInMinutes *= 60000;
-            beenAWhileTimer = new System.Timers.Timer(beenAWhileTimeInMinutes); 
+            beenAWhileTimer = new System.Timers.Timer(beenAWhileTimeInMinutes);
             beenAWhileTimer.Elapsed += BeenAWhileTimerIsGoingOff;
             responseTimer = new System.Timers.Timer(responseTimeInMinutes);
             responseTimer.Elapsed += ResponseTimerIsGoingOff;
             SystemEvents.SessionSwitch += HandleSessionSwitch;
+            stegos = new List<string>();
         }
 
+        public event SessionRequiresCheckInHanlder OnSessionRequiresCheckIn;
+
+        public event SessionRequiresCheckOutHanlder OnSessionRequiresCheckOut;
+
         public bool DialogHasResponse { get { return dialogHasResponse; } }
+
+        public List<string> Stegos { get { return stegos; } }
+
+        public StegoExt.CheckOutType CheckedOutType { get {return checkedOutType; } set {checkedOutType = value; } }
 
         public bool CheckedOut
         {
@@ -35,17 +48,35 @@ namespace Stego
             {
                 if (value == true)
                 {
-                    screenLocked = false;
                     beenAWhileTimer.Enabled = true;
                     checkedOut = true;
                 }
                 else
                 {
-
+                    checkedOut = false;
                 }               
             }
             
             get { return checkedOut; }
+        }
+
+        public void AddStegos(string stegoName)
+        {
+            stegos.Add(stegoName);
+        }
+
+        public void RemoveStegos(string stegoName)
+        {
+            stegos.Remove(stegoName);
+        }
+
+        public void EndSession()
+        {
+            beenAWhileTimer.Dispose();
+            responseTimer.Dispose();
+            beenAWhileTimer.Elapsed -= BeenAWhileTimerIsGoingOff;
+            responseTimer.Elapsed -= ResponseTimerIsGoingOff;
+            SystemEvents.SessionSwitch -= HandleSessionSwitch;
         }
 
         private void BeenAWhileTimerIsGoingOff(object source, ElapsedEventArgs e)
@@ -64,7 +95,14 @@ namespace Stego
                 else if (!(checkedOut))
                 {
                     beenAWhileTimer.Enabled = true;
-                    CheckOutStegos();
+                    if (OnSessionRequiresCheckOut != null)
+                    {
+                        OnSessionRequiresCheckOut(this, new SessionRequiresCheckOut(checkedOutType));
+                    }
+                    else
+                    {
+                        throw new NotImplementedException("No hanlder exists for SessionRequiresCheckOut");
+                    }
                 }
                 else
                 {
@@ -73,7 +111,14 @@ namespace Stego
             }
             else if (dialogResult == DialogResult.No)
             {
-                CheckInStegos();
+                if (OnSessionRequiresCheckIn != null)
+                {
+                    OnSessionRequiresCheckIn(this, new SessionRequiresCheckIn("User no longer needs Stegos"));
+                }
+                else
+                {
+                    throw new NotImplementedException("No hanlder exists for SessionRequiresCheckIn");
+                }
             }
             responseTimer.Enabled = false;
             dialogHasResponse = true;
@@ -81,17 +126,63 @@ namespace Stego
 
         private void ResponseTimerIsGoingOff(object source, ElapsedEventArgs e)
         {
-            CheckInStegos();
+            if (OnSessionRequiresCheckIn != null)
+            {
+                OnSessionRequiresCheckIn(this, new SessionRequiresCheckIn("User hasn't responded to dialog in time."));
+            }
+            else
+            {
+                throw new NotImplementedException("No hanlder exists for SessionRequiresCheckIn");
+            }
             responseTimer.Enabled = false;
-
         }
 
         private void HandleSessionSwitch(object sender, SessionSwitchEventArgs e)
         {
-            CheckInStegos();
-            beenAWhileTimer.Enabled = false;
-            responseTimer.Enabled = false;
-            screenLocked = true;
+            if (checkedOut)
+            {
+                if (OnSessionRequiresCheckIn != null)
+                {
+                    OnSessionRequiresCheckIn(this, new SessionRequiresCheckIn("User has triggered session switch (locked screen, logged off, etc.)"));
+                }
+                else
+                {
+                    throw new NotImplementedException("No hanlder exists for SessionRequiresCheckIn");
+                }
+                if (!dialogHasResponse)
+                {
+                    screenLocked = true;
+                }               
+            }           
         }
+    }
+
+    public delegate void SessionRequiresCheckInHanlder(object source, SessionRequiresCheckIn e);
+    public class SessionRequiresCheckIn : EventArgs
+    {
+        private readonly string Reason;
+        public SessionRequiresCheckIn(string reason)
+        {
+            Reason = reason;
+        }
+        public string GetInfo()
+        {
+            return Reason;
+        }
+    }
+
+    public delegate void SessionRequiresCheckOutHanlder(object source, SessionRequiresCheckOut e);
+    public class SessionRequiresCheckOut : EventArgs
+    {
+        private readonly CheckOutType CheckedOutType;
+        public SessionRequiresCheckOut(CheckOutType checkedOutType)
+        {
+            CheckedOutType = checkedOutType;
+        }
+        public CheckOutType GetInfo()
+        {
+            return CheckedOutType;
+        }
+
     }
 }

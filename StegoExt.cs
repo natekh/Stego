@@ -11,6 +11,7 @@ using KeePassLib;
 using Microsoft.Win32;
 using KeePass.Forms;
 using System.Security.Cryptography;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement.TextBox;
 
 
 namespace Stego
@@ -19,19 +20,9 @@ namespace Stego
     {
         private IPluginHost m_host = null;
 
-        private bool checkOut = false;
+        private StegoSession session;
 
-        private List<string> stegos = new List<string>();
-
-        private System.Timers.Timer beenAWhileTimer;
-
-        private System.Timers.Timer responseTimer;
-
-        private bool screenLocked = false;
-
-        private bool dialogHasResponse = true;
-
-        private enum CheckOutType
+        public enum CheckOutType
         {
             AES,
             DPAPI,
@@ -42,25 +33,17 @@ namespace Stego
         {
             if (host == null) return false;
             m_host = host;
-            beenAWhileTimer = new System.Timers.Timer(3600000); //1 hour timer
-            //beenAWhileTimer = new System.Timers.Timer(10000); //10 second timer for testing
-            beenAWhileTimer.Enabled = false;
-            beenAWhileTimer.Elapsed += BeenAWhileTimerIsGoingOff;
-            responseTimer = new System.Timers.Timer(300000); //5 minute timer
-            //responseTimer = new System.Timers.Timer(5000); //5 second timer for testing
-            responseTimer.Enabled = false;
-            responseTimer.Elapsed += ResponseTimerIsGoingOff;
-            SystemEvents.SessionSwitch += HandleSessionSwitch;
+            session = new StegoSession(60, 5);
+            session.OnSessionRequiresCheckIn += this.CheckIn;
+            session.OnSessionRequiresCheckOut += this.HandlesSessionRequiresCheckOut;
             return true;
         }
         public override void Terminate()
         {
             CheckInStegos();
-            beenAWhileTimer.Dispose();
-            responseTimer.Dispose();
-            beenAWhileTimer.Elapsed -= BeenAWhileTimerIsGoingOff;
-            responseTimer.Elapsed -= ResponseTimerIsGoingOff;
-            SystemEvents.SessionSwitch -= HandleSessionSwitch;
+            session.OnSessionRequiresCheckIn -= this.CheckIn;
+            session.OnSessionRequiresCheckOut -= this.HandlesSessionRequiresCheckOut;
+            session.EndSession();
         }
         public override ToolStripMenuItem GetMenuItem(PluginMenuType t)
         {
@@ -106,10 +89,10 @@ namespace Stego
 
                 PwDatabase pd = m_host.Database;
                 bool bOpen = ((pd != null) && pd.IsOpen);
-                tsmiAESCheckout.Enabled = bOpen && !(checkOut) && dialogHasResponse;
-                tsmiDPAPICheckOut.Enabled = bOpen && !(checkOut) && dialogHasResponse;
-                tsmiPlainTextCheckOut.Enabled = bOpen && !(checkOut) && dialogHasResponse;
-                tsmiCheckIn.Enabled = bOpen && checkOut && dialogHasResponse;               
+                tsmiAESCheckout.Enabled = bOpen && !(session.CheckedOut) && session.DialogHasResponse;
+                tsmiDPAPICheckOut.Enabled = bOpen && !(session.CheckedOut) && session.DialogHasResponse;
+                tsmiPlainTextCheckOut.Enabled = bOpen && !(session.CheckedOut) && session.DialogHasResponse;
+                tsmiCheckIn.Enabled = bOpen && session.CheckedOut && session.DialogHasResponse;               
             };
 
             return tsmi;
@@ -119,26 +102,27 @@ namespace Stego
         private void AESCheckOut(object sender, EventArgs e)
         {
             CheckOutStegos(CheckOutType.AES);
-            screenLocked = false;
         }
 
         private void DPAPICheckOut(object sender, EventArgs e)
         {
             CheckOutStegos(CheckOutType.DPAPI);
-            screenLocked = false;
         }
 
         private void PlainTextCheckOut(object sender, EventArgs e)
         {
             CheckOutStegos(CheckOutType.PlainText);
-            screenLocked = false;
+        }
+
+        private void HandlesSessionRequiresCheckOut(object sender, SessionRequiresCheckOut e)
+        {
+            CheckOutStegos(e.GetInfo());
         }
 
         private void CheckOutStegos(CheckOutType checkOutType)
         {
-            bool atLeastOne = false;
-            PwDatabase pd = m_host.Database;            
-            
+            PwDatabase pd = m_host.Database;
+
             if ((pd != null) && pd.IsOpen)
             {
                 var entries = pd.RootGroup.GetEntries(true); //may want to allow the user to choose subgroup or not
@@ -146,149 +130,133 @@ namespace Stego
                 {
                     string credu = null;
                     string credp = null;
-                    byte[] credub = null;
-                    byte[] credpb = null;
+                    string credt = null;
 
-                    var credt = entry.Strings.ReadSafe("Title");
-                    if (DPAPI)
+                    credt = entry.Strings.ReadSafe("Title");
+                    switch (checkOutType)
                     {
-                        credub = ProtectedData.Protect(Encoding.UTF8.GetBytes(entry.Strings.ReadSafe("Username")),null, DataProtectionScope.CurrentUser);
-                        credpb = ProtectedData.Protect(Encoding.UTF8.GetBytes(entry.Strings.ReadSafe("Password")), null, DataProtectionScope.CurrentUser);
-                    }
-                    else
-                    {
-                        credu = entry.Strings.ReadSafe("UserName");
-                        credp = entry.Strings.ReadSafe("Password");
-                    }
-                    
-                    try
-                    {
-                        if (credt != null)
-                        {
-                            if ((credu != null && !DPAPI) || (credub != null && DPAPI))
+                        case CheckOutType.AES:
+                            break;
+                        case CheckOutType.DPAPI:
+                            credu = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(entry.Strings.ReadSafe("Username")), null, DataProtectionScope.CurrentUser));
+                            credp = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(entry.Strings.ReadSafe("Password")), null, DataProtectionScope.CurrentUser));
+                            if (!SetEnvVar(credt, credu, credp))
                             {
-                                if (DPAPI)
-                                {
-                                    System.Environment.SetEnvironmentVariable($"{credt}_u", Convert.ToBase64String(credub), EnvironmentVariableTarget.User);
-                                }
-                                else
-                                {
-                                    System.Environment.SetEnvironmentVariable($"{credt}_u", credu, EnvironmentVariableTarget.User);
-                                }
-                                
-                                stegos.Add($"{credt}_u");
+                                return;
                             }
-                            if ((credp != null && !DPAPI) || (credpb != null && DPAPI))
+                            else
                             {
-                                if (DPAPI)
-                                {
-                                    System.Environment.SetEnvironmentVariable($"{credt}_p", Convert.ToBase64String(credpb), EnvironmentVariableTarget.User);
-                                }
-                                else
-                                {
-                                    System.Environment.SetEnvironmentVariable($"{credt}_p", credp, EnvironmentVariableTarget.User);
-                                }
-                                
-                                stegos.Add($"{credt}_p");
+                                session.CheckedOutType = CheckOutType.DPAPI;
                             }
-                        }
-                        atLeastOne = true;
+                            break;
+                        case CheckOutType.PlainText:
+                            credu = entry.Strings.ReadSafe("UserName");
+                            credp = entry.Strings.ReadSafe("Password");
+                            if (!SetEnvVar(credt, credu, credp))
+                            {
+                                return;
+                            }
+                            else
+                            {
+                                session.CheckedOutType = CheckOutType.PlainText;
+                            }
+                            break;
                     }
-                    catch (Exception err)
+                    session.CheckedOut = true;
+                }
+            }
+        }
+
+        private bool SetEnvVar(string credt, string credu, string credp)
+        {
+            try
+            {
+                if (credt != null)
+                {
+                    if (credu != null)
                     {
-                        if (atLeastOne)
+                        string name = $"{credt}_u";
+                        if (CheckForExistingVarSuccess(name))
                         {
-                            MessageBox.Show($"Not all creds were Stego'd\nChecking all back in\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            CheckInStegos();
+                            System.Environment.SetEnvironmentVariable(name, credu, EnvironmentVariableTarget.User);
+                            session.AddStegos(name);
                         }
                         else
                         {
-                            MessageBox.Show($"No creds were Stego'd\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            return false;
                         }
-                        return;
+                        
+                    }
+                    if (credp != null)
+                    {
+                        string name = $"{credt}_p";
+                        if (CheckForExistingVarSuccess(name))
+                        {
+                            System.Environment.SetEnvironmentVariable(name, credp, EnvironmentVariableTarget.User);
+                            session.AddStegos(name);
+                        }
+                        else
+                        {
+                            return false;
+                        }
+                        
                     }
                 }
-                checkOut = true;
-                beenAWhileTimer.Enabled = true;
+                return true;
             }
+            catch (Exception err)
+            {
+                MessageBox.Show($"Creds weren't Stego'd. An error occured.\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                CheckInStegos();
+                return false;
+            }
+        }
+
+        private bool CheckForExistingVarSuccess(string name)
+        {
+            if (System.Environment.GetEnvironmentVariable(name) != null)
+            {
+                MessageBox.Show($"{name} already exists as an environment variable.\n Stegos won't overwrite existing variables. Ending CheckOut. Please resolve issue and try again.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                CheckInStegos();
+                return false;
+            }
+            return true;
         }
 
         private void CheckIn(object sender, EventArgs e)
         {
             CheckInStegos();
-            beenAWhileTimer.Enabled = false;
         }
 
         private void CheckInStegos()
         {
-            bool failed = false;
-            foreach(string stego in stegos)
+            bool success = true;
+            List<string> successfullyRemoved = new List<string>();
+            foreach(string stego in session.Stegos)
             {
                 try
                 {
                     Environment.SetEnvironmentVariable(stego, null, EnvironmentVariableTarget.User);
+                    successfullyRemoved.Add(stego);                                     
                 }
                 catch(Exception err)
                 {
-                    MessageBox.Show($"Error checking in {stego}\nPlease delete manually\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    failed = true;
+                    MessageBox.Show($"Error checking in {stego}\nPlease delete manually or try again.\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    success = false;
                 }
             }
-            if (failed)
+            foreach(string stego in successfullyRemoved)
             {
-                checkOut = true;
+                session.RemoveStegos(stego);
+            }
+            if (success)
+            {
+                session.CheckedOut = false;
             }
             else
             {
-                checkOut= false;
+                session.CheckedOut = true;
             }
         }
-
-        private void BeenAWhileTimerIsGoingOff(object source, ElapsedEventArgs e)
-        {
-            responseTimer.Enabled = true;
-            beenAWhileTimer.Enabled = false;
-            dialogHasResponse = false;
-            DialogResult dialogResult = MessageBox.Show("Do you still need your stegos?", "It's been a while", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2, MessageBoxOptions.DefaultDesktopOnly);
-            if (dialogResult == DialogResult.Yes)
-            {         
-                if (screenLocked)
-                {
-                    screenLocked = false;
-                    MessageBox.Show("It looks like you locked your screen.\nPlease check out your stegos manually.", "Check Out Manually", MessageBoxButtons.OK, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1, MessageBoxOptions.DefaultDesktopOnly);
-                }
-                else if (!(checkOut))
-                {
-                    beenAWhileTimer.Enabled = true;
-                    CheckOutStegos();
-                }
-                else
-                {
-                    beenAWhileTimer.Enabled = true;
-                }
-            }
-            else if (dialogResult == DialogResult.No)
-            {
-                CheckInStegos();
-            }
-            responseTimer.Enabled = false;
-            dialogHasResponse = true;
-        }
-
-        private void ResponseTimerIsGoingOff(object source, ElapsedEventArgs e)
-        {
-            CheckInStegos();
-            responseTimer.Enabled = false;
-            
-        }
-
-        private void HandleSessionSwitch(object sender, SessionSwitchEventArgs e)
-        {
-            CheckInStegos();
-            beenAWhileTimer.Enabled = false;
-            responseTimer.Enabled = false;
-            screenLocked = true;
-        }
-
     }
 }
