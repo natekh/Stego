@@ -1,4 +1,6 @@
 ﻿using System;
+using System.IO;
+using System.IO.Pipes;
 using System.Collections.Generic;
 using System.Timers;
 using System.Linq;
@@ -12,7 +14,7 @@ using Microsoft.Win32;
 using KeePass.Forms;
 using System.Security.Cryptography;
 using static System.Windows.Forms.VisualStyles.VisualStyleElement.TextBox;
-
+using System.Threading;
 
 namespace Stego
 {
@@ -21,6 +23,8 @@ namespace Stego
         private IPluginHost m_host = null;
 
         private StegoSession session;
+
+        private NamedPipeServerStream pipeServer;
 
         public enum CheckOutType
         {
@@ -122,6 +126,7 @@ namespace Stego
         private void CheckOutStegos(CheckOutType checkOutType)
         {
             PwDatabase pd = m_host.Database;
+            byte[] randomKey = null;
 
             if ((pd != null) && pd.IsOpen)
             {
@@ -131,11 +136,17 @@ namespace Stego
                     string credu = null;
                     string credp = null;
                     string credt = null;
-
+                    
                     credt = entry.Strings.ReadSafe("Title");
                     switch (checkOutType)
                     {
                         case CheckOutType.AES:
+                            randomKey = GenerateKey();
+                            using (Aes myAes = Aes.Create())
+                            {
+                                credu = EncryptString(entry.Strings.ReadSafe("Username"), randomKey, myAes.Key);
+                                credp = EncryptString(entry.Strings.ReadSafe("Username"), randomKey, myAes.Key);
+                            }
                             break;
                         case CheckOutType.DPAPI:
                             credu = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(entry.Strings.ReadSafe("Username")), null, DataProtectionScope.CurrentUser));
@@ -162,9 +173,100 @@ namespace Stego
                             }
                             break;
                     }
-                    session.CheckedOut = true;
+                }
+                session.CheckedOut = true;
+                if (checkOutType == CheckOutType.AES)
+                {
+                    if (randomKey != null)
+                    {
+                        try
+                        {
+                            new Thread(delegate () { OpenPipe(randomKey); }).Start();
+                        }
+                        catch (Exception err)
+                        {
+                            MessageBox.Show($"Thread for pipe failed. Checking in Stegos.\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            CheckInStegos();
+                        }
+                    }
+                    else
+                    {
+                        MessageBox.Show($"There was an issue generating a key.\nChecking in Stegos.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        CheckInStegos();
+                    }                  
+                }               
+            }
+        }
+
+        private void OpenPipe(byte[] message)
+        {
+            while(session.CheckedOut && session.CheckedOutType == CheckOutType.AES)
+            {
+                try
+                {
+                    pipeServer = new NamedPipeServerStream("Stego", PipeDirection.Out);
+                    pipeServer.WaitForConnection();
+                    pipeServer.Write(message, 0, message.Length);
+                }
+                catch (Exception err)
+                {
+                    MessageBox.Show($"Pipe failed. Checking in Stegos.\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    CheckInStegos();
                 }
             }
+        }
+
+        private byte[] GenerateKey()
+        {
+            const string valid = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890!@#$%^&*()-+,./?;:[]{}|=";
+            Random rnd = new Random();
+            int length = rnd.Next(40, 50);
+            byte[] bytes = new byte[length];
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                bytes[i] = Convert.ToByte(valid[rnd.Next(valid.Length)]);
+            }
+            return bytes;
+        }
+
+        private string EncryptString(string plainText, byte[] key, byte[] IV)
+        {
+            // Check arguments.
+            if (plainText == null || plainText.Length <= 0)
+                throw new ArgumentNullException("plainText");
+            if (key == null || key.Length <= 0)
+                throw new ArgumentNullException("Key");
+            if (IV == null || IV.Length <= 0)
+                throw new ArgumentNullException("IV");
+            byte[] encrypted;
+
+            // Create an Aes object
+            // with the specified key and IV.
+            using (Aes aesAlg = Aes.Create())
+            {
+                aesAlg.Key = key;
+                aesAlg.IV = IV;
+
+                // Create an encryptor to perform the stream transform.
+                ICryptoTransform encryptor = aesAlg.CreateEncryptor(aesAlg.Key, aesAlg.IV);
+
+                // Create the streams used for encryption.
+                using (MemoryStream msEncrypt = new MemoryStream())
+                {
+                    using (CryptoStream csEncrypt = new CryptoStream(msEncrypt, encryptor, CryptoStreamMode.Write))
+                    {
+                        using (StreamWriter swEncrypt = new StreamWriter(csEncrypt))
+                        {
+                            //Write all data to the stream.
+                            swEncrypt.Write(plainText);
+                        }
+                        encrypted = msEncrypt.ToArray();
+                    }
+                }
+            }
+
+            // Return the encrypted bytes from the memory stream.
+            return Convert.ToBase64String(encrypted);
         }
 
         private bool SetEnvVar(string credt, string credu, string credp)
