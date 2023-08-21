@@ -209,7 +209,7 @@ namespace Stego
                 session.CheckedOut = true;
                 if (checkOutType == CheckOutType.AES)
                 {
-                    if (key != null)
+                    if (key != null) //double check this line.
                     {
                         try
                         {
