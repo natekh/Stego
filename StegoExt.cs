@@ -26,6 +26,8 @@ namespace Stego
 
         private NamedPipeServerStream pipeServer;
 
+        private bool endThread;
+
         public enum CheckOutType
         {
             AES,
@@ -126,26 +128,56 @@ namespace Stego
         private void CheckOutStegos(CheckOutType checkOutType)
         {
             PwDatabase pd = m_host.Database;
-            byte[] randomKey = null;
-
-            if ((pd != null) && pd.IsOpen)
+            //byte[] randomKey = null;
+            Aes aesObj = null;
+            byte[] key = null;
+            byte[] iv = null;
+            if (checkOutType == CheckOutType.AES)
             {
+                aesObj = Aes.Create();
+                key = aesObj.Key;
+                iv = aesObj.IV;
+            }
+            if ((pd != null) && pd.IsOpen)
+            {               
                 var entries = pd.RootGroup.GetEntries(true); //may want to allow the user to choose subgroup or not
                 foreach (var entry in entries)
                 {
                     string credu = null;
                     string credp = null;
                     string credt = null;
-                    
+                                      
                     credt = entry.Strings.ReadSafe("Title");
                     switch (checkOutType)
                     {
-                        case CheckOutType.AES:
-                            randomKey = GenerateKey();
-                            using (Aes myAes = Aes.Create())
+                        case CheckOutType.AES:                           
+                            //randomKey = GenerateKey();
+
+                            string one = entry.Strings.ReadSafe("Username");
+                            MessageBox.Show($"{one}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            string two = entry.Strings.ReadSafe("Password");
+                            MessageBox.Show($"{two}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            if (one != null && one != string.Empty && key != null && iv != null)
                             {
-                                credu = EncryptString(entry.Strings.ReadSafe("Username"), randomKey, myAes.Key);
-                                credp = EncryptString(entry.Strings.ReadSafe("Username"), randomKey, myAes.Key);
+                                credu = EncryptString(one, key, iv);
+                            }
+                            if (two != null && two != string.Empty && key != null && iv != null)
+                            {
+                                credp = EncryptString(two, key, iv);
+                            }
+                            //credu = EncryptString(entry.Strings.ReadSafe("Username"), randomKey, myAes.IV);
+                            //credp = EncryptString(entry.Strings.ReadSafe("Password"), randomKey, myAes.IV);
+                            if (aesObj != null)
+                            {
+                                aesObj.Dispose();
+                            }                           
+                            if (!SetEnvVar(credt, credu, credp))
+                            {
+                                return;
+                            }
+                            else
+                            {
+                                session.CheckedOutType = CheckOutType.AES;
                             }
                             break;
                         case CheckOutType.DPAPI:
@@ -177,11 +209,11 @@ namespace Stego
                 session.CheckedOut = true;
                 if (checkOutType == CheckOutType.AES)
                 {
-                    if (randomKey != null)
+                    if (key != null)
                     {
                         try
                         {
-                            new Thread(delegate () { OpenPipe(randomKey); }).Start();
+                            new Thread(delegate () { OpenPipe(key); }).Start();
                         }
                         catch (Exception err)
                         {
@@ -200,20 +232,92 @@ namespace Stego
 
         private void OpenPipe(byte[] message)
         {
-            while(session.CheckedOut && session.CheckedOutType == CheckOutType.AES)
+            endThread = false;
+            MessageBox.Show($"OpenPipe method starting. endThread equals {endThread} session.checkedOut equals {session.CheckedOut} Type equals {session.CheckedOutType} ", "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);           
+            try
             {
-                try
+                pipeServer = new NamedPipeServerStream("Stego", PipeDirection.Out);                         
+            }
+            catch (IOException err)
+            {
+                MessageBox.Show($"IO Error on creation.\n {err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                var connected = pipeServer.IsConnected;
+            }
+            catch (Exception err)
+            {
+                MessageBox.Show($"Pipe failed on creation other than IO Error. Checking in Stegos.\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                CheckInStegos();
+                return;
+            }           
+            //while (session.CheckedOut && session.CheckedOutType == CheckOutType.AES)
+            while((session.CheckedOut && session.CheckedOutType == CheckOutType.AES) && !(endThread))
+            {
+                MessageBox.Show($"New Pipe Loop", "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (pipeServer.IsConnected)
                 {
-                    pipeServer = new NamedPipeServerStream("Stego", PipeDirection.Out);
+                    pipeServer.Disconnect();
+                }
+                try
+                {                  
                     pipeServer.WaitForConnection();
                     pipeServer.Write(message, 0, message.Length);
+                    pipeServer.Disconnect();
+                }
+                catch (IOException)
+                {
+                    pipeServer.Disconnect();
                 }
                 catch (Exception err)
                 {
                     MessageBox.Show($"Pipe failed. Checking in Stegos.\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     CheckInStegos();
-                }
+                }               
             }
+            if (pipeServer.IsConnected)
+            {
+                try
+                {
+                    pipeServer.Disconnect();
+                    pipeServer.Close();
+                    pipeServer.Dispose();
+                }
+                catch (Exception err)
+                {
+                    MessageBox.Show($"Error disposing of pipe.\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+               
+            }
+            else
+            {
+                try
+                {
+                    pipeServer.Close();
+                    pipeServer.Dispose();
+                }
+                catch (Exception err)
+                {
+                    MessageBox.Show($"Error disposing of pipe.\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+
+            }
+        }
+
+        private void ConnectPipeToCloseThread()
+        {
+            endThread = true;
+            try
+            {
+                var pipeClient = new NamedPipeClientStream(".", "Stego", PipeDirection.In);
+                pipeClient.Connect();
+                Thread.Sleep(1000);
+                pipeClient.Close();
+                pipeClient.Dispose();
+            }
+            catch (Exception err)
+            {
+                MessageBox.Show($"Error connecting to pipe to close thread.\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            
         }
 
         private byte[] GenerateKey()
@@ -334,7 +438,27 @@ namespace Stego
         {
             bool success = true;
             List<string> successfullyRemoved = new List<string>();
-            foreach(string stego in session.Stegos)
+            if (session.CheckedOutType == CheckOutType.AES && session.CheckedOut)
+            {
+                ConnectPipeToCloseThread();
+            }
+            //if(session.CheckedOutType == CheckOutType.AES)
+            //{
+            //    MessageBox.Show($"{pipeServer}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            //    if (pipeServer != null && pipeServer.IsConnected)
+            //    {
+            //        MessageBox.Show($"It is connected.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            //        pipeServer.Disconnect();
+            //        pipeServer.Dispose();
+            //    }
+            //    else if (pipeServer != null)
+            //    {
+            //        MessageBox.Show($"It is NOT connected.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            //        pipeServer.Dispose();
+            //    }
+            //    MessageBox.Show($"{pipeServer}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            //}
+            foreach (string stego in session.Stegos)
             {
                 try
                 {
@@ -343,7 +467,7 @@ namespace Stego
                 }
                 catch(Exception err)
                 {
-                    MessageBox.Show($"Error checking in {stego}\nPlease delete manually or try again.\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show($"Error checking in {stego}\nPlease delete manually or try again.\nIf using AES, Pipe is closed!\n{err}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     success = false;
                 }
             }
@@ -353,7 +477,7 @@ namespace Stego
             }
             if (success)
             {
-                session.CheckedOut = false;
+                session.CheckedOut = false;                
             }
             else
             {
