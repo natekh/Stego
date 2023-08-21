@@ -153,7 +153,7 @@ namespace Stego
                         case CheckOutType.AES:                           
                             //randomKey = GenerateKey();
 
-                            string one = entry.Strings.ReadSafe("Username");
+                            string one = entry.Strings.ReadSafe("UserName");
                             MessageBox.Show($"{one}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                             string two = entry.Strings.ReadSafe("Password");
                             MessageBox.Show($"{two}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -181,7 +181,7 @@ namespace Stego
                             }
                             break;
                         case CheckOutType.DPAPI:
-                            credu = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(entry.Strings.ReadSafe("Username")), null, DataProtectionScope.CurrentUser));
+                            credu = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(entry.Strings.ReadSafe("UserName")), null, DataProtectionScope.CurrentUser));
                             credp = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(entry.Strings.ReadSafe("Password")), null, DataProtectionScope.CurrentUser));
                             if (!SetEnvVar(credt, credu, credp))
                             {
